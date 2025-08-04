@@ -4,7 +4,7 @@
 # Ignore environment variables file
 /.env
 
-# Ignore PyCharm's project files (optional, but good practice)
+# Ignore PyCharm's project files
 /.idea/
 
 # Ignore system-specific files
