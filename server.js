@@ -6,12 +6,21 @@ require('dotenv').config(); // This line loads environment variables from .env
 const bcrypt = require('bcrypt'); // Import bcrypt for password hashing
 const jwt = require('jsonwebtoken'); // Import jsonwebtoken for JWTs
 const authenticateToken = require('./middleware/authMiddleware'); // Import your auth middleware
+const cors = require('cors'); // <-- Import cors middleware
+const crypto = require('crypto'); // For password reset
+const mailer = require('./mailer'); // For password reset
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware to parse JSON body from requests
 app.use(express.json());
+
+// Middleware to parse JSON body from requests
+app.use(express.json());
+
+// Enable CORS for all routes
+app.use(cors()); // <-- NEW: Use the cors middleware
 
 // Configure the MySQL connection pool
 const pool = mysql.createPool({
@@ -38,7 +47,11 @@ async function testDbConnection() {
 }
 testDbConnection();
 
-// Basic Route: Handles GET requests to the root URL ('/')
+//-----------------------------------------------------------------------
+
+// BASIC ROUTE
+
+// Handles GET requests to the root URL ('/')
 app.get('/', (req, res) => {
     res.send('Welcome to the Bikeway Backend API! (Status: Online with MySQL)');
 });
@@ -54,7 +67,10 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
-// User Registration Route
+//-----------------------------------------------------------------------
+
+// USER REGISTRATION ROUTE
+
 app.post('/api/register', async (req, res) => {
     const { username, email, password } = req.body;
 
@@ -94,7 +110,10 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// *** User Login Route ***
+//-----------------------------------------------------------------------
+
+// USER LOGIN ROUTE
+
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
 
@@ -147,6 +166,10 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+//-----------------------------------------------------------------------
+
+//USER PROFILE ROUTE
+
 // This route will only be accessible if a valid JWT is provided
 app.get('/api/profile', authenticateToken, async (req, res) => {
     // If we reach here, the token was verified, and req.user contains the payload
@@ -163,6 +186,78 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
         res.status(500).json({ message: 'Server error fetching profile.' });
     }
 });
+
+//-----------------------------------------------------------------------
+
+// PASSWORD RESET ROUTE
+
+// [1] User submits their email to request a reset link
+app.post('/api/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    if (!email) {
+        return res.status(400).send('Email is required.');
+    }
+
+    try {
+        const [rows] = await pool.execute('SELECT id FROM users WHERE email = ?', [email]);
+        const user = rows[0];
+
+        if (user) {
+            const token = crypto.randomBytes(32).toString('hex');
+            const expires = new Date(Date.now() + 3600000); // 1 hour expiration
+
+            await pool.execute(
+                'UPDATE users SET password_reset_token = ?, password_reset_expires = ? WHERE id = ?',
+                [token, expires, user.id]
+            );
+
+            const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${token}`;
+            await mailer.sendPasswordResetEmail(email, resetLink);
+        }
+
+        // Always send a non-specific success message to prevent user enumeration
+        res.status(200).send('If a matching email was found, a password reset link has been sent.');
+
+    } catch (error) {
+        console.error('Password reset error:', error);
+        res.status(500).send('Server error.');
+    }
+});
+
+// [2] User submits their new password with the token
+app.post('/api/reset-password', async (req, res) => {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+        return res.status(400).send('Token and new password are required.');
+    }
+
+    try {
+        const [rows] = await pool.execute(
+            'SELECT id, password_reset_expires FROM users WHERE password_reset_token = ?',
+            [token]
+        );
+        const user = rows[0];
+
+        if (!user || new Date() > user.password_reset_expires) {
+            return res.status(400).send('Invalid or expired token.');
+        }
+
+        const newPasswordHash = await bcrypt.hash(newPassword, 10);
+        await pool.execute(
+            'UPDATE users SET password_hash = ?, password_reset_token = NULL, password_reset_expires = NULL WHERE id = ?',
+            [newPasswordHash, user.id]
+        );
+
+        res.status(200).send('Password successfully reset!');
+
+    } catch (error) {
+        console.error('Reset password error:', error);
+        res.status(500).send('Server error.');
+    }
+});
+
+//-----------------------------------------------------------------------
 
 // Start the Express server and listen for incoming network requests
 app.listen(PORT, () => {
